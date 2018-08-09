@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Logger
-// @namespace    http://tampermonkey.net/
-// @version      1.0
+// @namespace    https://github.com/wi99
+// @version      1.1
 // @description  Log stuff on the instagram homepage. It will only log what you see.
 // @author       William Situ
 // @match        https://www.instagram.com/
@@ -51,7 +51,6 @@ function logStories(stories_list){
 }
 
 function parseAction(divElem){
-    //console.log(divElem);
     return {'username': divElem.getElementsByTagName('a')[0].href.split('/').slice(-2)[0],
             'action': divElem.children[1].childNodes[0].data.trim()+divElem.children[1].childNodes[2].data.trim(), // only "Your facebook friend is on Instagram as" uses childNodes[0]. TODO: decide whether to log that facebook thing
             'timestamp': Math.floor(Date.parse(divElem.getElementsByTagName('time')[0].attributes.datetime.value) / 1000)}
@@ -76,14 +75,14 @@ function logActivity(activity_list) {
 
 /**
  * Data to indexedDB
- * @param {String} storeName - name of object store in indexedDB to log it in
- * @param {JSON} item - JSON object to log
+ * @param {string} storeName - name of object store in indexedDB to log it in
+ * @param {JSONobject} item - JSON object to log
  */
 function logData(storeName, item){
     var request = indexedDB.open('InstagramLog', 1); // starts from 1
 
     request.onerror = function(event) {
-        console.log("Why didn't you allow me to use IndexedDB?!");
+        alert("Why didn't you allow me to use IndexedDB?!");
     };
 
     request.onupgradeneeded = function(event) {
@@ -93,7 +92,7 @@ function logData(storeName, item){
         objectStore.createIndex("timestamp", "timestamp");
         objectStore.createIndex("username", "username");
 
-        /* if(db.objectStoreNames.contains('stories')) { // what if something weird was set as the keypath/index? TODO: if weird then revert to normal.
+        /* if(db.objectStoreNames.contains('stories')) { // what if something weird was set as the keypath/index? TODO: if weird then revert to normal. (TODO: fix when browser closes after db open but before objct stores created)
                     objectStore2 = event.target.transaction.objectStore('stories');
                     objectStore2.deleteIndex('username');
                     objectStore2.createIndex('');
@@ -104,7 +103,7 @@ function logData(storeName, item){
         var objectStore3 = db.createObjectStore("activity", { keyPath: ['timestamp', 'username']});
         objectStore3.createIndex("timestamp", "timestamp");
         objectStore3.createIndex("action", "action");
-        objectStore3.createIndex("username", "username");
+        objectStore3.createIndex("username", "username"); // FYI: only whatever in keypaths are unique
     };
 
     request.onsuccess = function(event) {
@@ -116,7 +115,7 @@ function logData(storeName, item){
         store.add(item) // no need to overwrite so I use add() instead of put()
 
         tx.onerror = function(){
-            //console.log('tx.onerror') // I wonder if I should handle duplicate entry myself instead of pushing it to error
+            console.log('tx.onerror') // I wonder if I should handle duplicate entry myself instead of pushing it to error
             db.close();
         }
         tx.oncomplete = function() {
@@ -199,7 +198,7 @@ if (document.documentElement.classList.contains('logged-in')){
             var observer = new MutationObserver(function (mutations) {
                 mutations.forEach(function (mutation) {
                     if (mutation.type == 'childList' && mutation.addedNodes[0]) {
-                        if (document.URL.split('/')[3] == 'stories' && document.getElementsByTagName('a')[0].href == document.getElementsByTagName('a')[1].href){ // accidental story logging seems too easy so here just in case
+                        if (window.location.pathname.split('/')[1] == 'stories' && document.getElementsByTagName('a')[0].href == document.getElementsByTagName('a')[1].href){ // accidental story logging seems too easy so here just in case
                             logData('stories', logStoriesStoryMode())
                         }
                     }
@@ -240,8 +239,18 @@ if (document.documentElement.classList.contains('logged-in')){
     }, false);
 }
 
-/* indexedDB to JSON download */ function exportData(storeNames) {
+/**
+ * indexedDB to a download file
+ * @param {string} filename - name of file w/o extension
+ * @param {string[]} storeNames - storenames to include in export
+ * @param {string} dateTimeFormat - only checks for ISO 8601
+ * @param {string} fileext - accepts json and csv
+ * @param {number} fileSizeLimit - number of bytes the file can be
+ * @param {HTMLobject} aElem - HTML object to write the download link to
+ */
+/* indexedDB to JSON download */ function exportData(filename, storeNames, dateTimeFormat, fileext, fileSizeLimit, aElem) {
     var request = indexedDB.open('InstagramLog', 1);
+    aElem.innerText = 'Creating Download Link...' // This line would be more useful if I did error catching and other statuses
 
     request.onsuccess = function (event) {
         var db = event.target.result;
@@ -249,39 +258,80 @@ if (document.documentElement.classList.contains('logged-in')){
         var tx = db.transaction(db.objectStoreNames, 'readonly');
         storeNames.forEach(function(storeName) { // use forEach or forleti=0 because openCursor().onsuccess is asynchronous
             if (db.objectStoreNames.contains(storeName)){
-                data[storeName] = [];
                 var store = tx.objectStore(storeName);
 
-                store.openCursor().onsuccess = function (event) {
-                    console.log(storeName);
+                if(fileext=='json'){
+                    data[storeName] = [];
+                    let len = JSON.stringify(data).length;
 
-                    var cursor = event.target.result;
-                    if (cursor && JSON.stringify(data).length < (1e6 * document.getElementById('inputFileSizeLimit').value)) { // modular is kill here // questioning efficiency of this. Maybe it's better to limit entries instead of file size.
-                        // TODO: range/constraint on cursor
-                        // TODO: export to CSV option because it takes less memory and space
-                        data[storeName].push(cursor.value);
-                        cursor.continue();
-                    }
-                };
+                    store.openCursor().onsuccess = function (event) {
+                        var cursor = event.target.result;
+                        if (cursor) {
+                            if (dateTimeFormat=='iso')
+                                cursor.value.timestamp=new Date(cursor.value.timestamp * 1000).toISOString()
+                            len+=JSON.stringify(cursor.value).length+1 // length is off by one since a single nonexistent comma was added
+                            if (len - 1 < fileSizeLimit){ // which is why here I subtract 1
+                                data[storeName].push(cursor.value);
+                                cursor.continue();
+                            }
+                            // TODO: range/constraint on cursor
+                        }
+                    };
+                }
+                else if (fileext=='csv'){
+                    data[storeName] = '';
+                    let len = 0
+                    Object.keys(data).forEach(function(key) {
+                        len+=(key+'\n').length
+                        len+=(data[key]+'\n').length
+                    })
+
+                    store.openCursor().onsuccess = function (event) {
+                        var cursor = event.target.result;
+                        if (cursor && len + data[storeName].length < fileSizeLimit) { // size might be a bit bigger since it appends then checks instead of json code which checks then appends
+                            if (dateTimeFormat=='iso')
+                                cursor.value.timestamp=new Date(cursor.value.timestamp * 1000).toISOString()
+                            if(!data[storeName]){
+                                let line = '';
+                                for (let i = 0;i < Object.keys(cursor.value).length; i++){
+                                    line+=Object.keys(cursor.value)[i]+','
+                                }
+                                data[storeName]+=(line.slice(0,-1)+'\n')
+                            }
+                            // TODO: range/constraint on cursor
+                            var line = ''
+                            Object.keys(cursor.value).forEach(function(key) {
+                                line+=cursor.value[key]+','
+                            });
+                            data[storeName]+=(line.slice(0,-1)+'\n')
+                            cursor.continue();
+                        }
+                    };
+                }
             }
         })
         tx.onerror = function () {
-            console.log('tx.onerror')
+            console.log('tx.onerror exportData')
             db.close();
         }
         tx.oncomplete = function () {
             // Export data
-            var blob = new Blob([JSON.stringify(data)], {type: 'octet/stream'});
+            var blob;
+            if (fileext == 'json'){
+                blob = new Blob([JSON.stringify(data)], {type: 'octet/stream'});
+            }
+            else if (fileext == 'csv'){
+                var fileParts = [];
+                Object.keys(data).forEach(function(key) {
+                    fileParts.push(key+'\n')
+                    fileParts.push(data[key]+'\n')
+                })
+                blob = new Blob(fileParts, {type: 'octet/stream'});
+            }
             var url = window.URL.createObjectURL(blob);
             // Create download link
-            document.getElementById('download').href = url; // modular is kill here too
-            var fileext;
-            if(document.getElementById('formFileType').elements[1].checked) { // modular is kill because I reference elem here
-                fileext = 'json'
-            } else {
-                fileext = 'csv'
-            }
-            document.getElementById('download').innerText = document.getElementById('download').download = document.getElementById('inputFilename').value + '.' + fileext; // maybe innerText should be 'Click to Download' instead.
+            aElem.href = url;
+            aElem.innerText = aElem.download = filename + '.' + fileext;
             db.close();
         };
     };
@@ -290,16 +340,16 @@ if (document.documentElement.classList.contains('logged-in')){
 
 /* creating GUI for exporting data */ {
     var fab = document.createElement('div'); // this isn't really a floating action button is it?
-    fab.style = 'z-index:9;position:fixed;top:0;right:50%;height:44px;width:44px;background-color:black;color:white;text-align:center;line-height:normal;font-size:30px;cursor:pointer'
+    fab.style = 'z-index:9;position:fixed;top:0;left:25%;height:44px;width:44px;background-color:black;color:white;text-align:center;line-height:normal;font-size:30px;cursor:pointer'
     fab.innerHTML = '&darr;'
-    document.body.insertBefore(fab, document.body.firstChild); // if I change innerHTML to outerHTML and do inserBefore before that line it only has 1 element, but onclick doesn't work.
+    document.body.insertBefore(fab, document.body.firstChild);
     fab.onclick = function(){
         /* show/hide overlay thing */
         if (!document.getElementById('overlayStuff')){
             var overlayStuff = document.createElement('div')
             overlayStuff.id="overlayStuff"
             overlayStuff.style="z-index:9;position:fixed;background-color:white"
-            overlayStuff.innerHTML = '<table style="width: 100%;">\n<tbody>\n<tr>\n<td><strong>File Name:</strong></td>\n<td><input id="inputFilename" value="data" type="text" /></td>\n</tr>\n<tr>\n<td><strong>Stuff to Save:</strong></td>\n<td><form id="formStuffSave">\n  <input value="posts"  type="checkbox" checked="checked"/>Posts<br/>\n  <input value="stories" type="checkbox" checked="checked" />Stories<br/>\n  <input value="activity" type="checkbox" checked="checked"/>Activity<br/>\n</form></td>\n</tr>\n<tr>\n<td><strong>Save as type:</strong></td>\n<td><form id="formFileType">\n  <input value="CSV - Comma Seperated Values" type="radio" disabled="disabled" />CSV - Comma Seperated Values<br /> <!-- this one should be default checed becaues it takes less memory -->\n  <input value="JSON - JavaScript Object Notation" checked="checked" type="radio" />JSON - JavaScript Object Notation\n</form></td>\n</tr>\n<tr>\n<td><strong>File Size Limit (MB):</strong></td>\n<td><input id="inputFileSizeLimit" value="50" min="1" type="number" /></td>\n</tr>\n</tbody>\n</table>\n<button id="buttonGenerateExport" type="button">Generate File to Download</button> <a id="download"></a>'
+            overlayStuff.innerHTML='<table style="width: 100%;"><tbody><tr><td><strong>File Name:</strong></td><td><input id="inputFilename" value="data" type="text"></td></tr><tr><td><strong>Stuff to Save:</strong></td><td><form id="formStuffSave"><input type="checkbox" value="posts" checked>Posts<br><input type="checkbox" value="stories" checked>Stories<br><input type="checkbox" value="activity" checked>Activity<br> </form></td></tr><tr><td><strong>Date/Time Format:</strong></td><td><select id="selectDateTimeFormat"><option value="unix">Unix Time</option><option value="iso">ISO 8601</option></select></td></tr><tr><td><strong>Save as type:</strong></td><td><select id="selectFileType"><option value="csv">CSV - Comma Seperated Values</option><option value="json">JSON - JavaScript Object Notation</option></select></td></tr><tr><td><strong>File Size Limit (MB):</strong></td><td><input id="inputFileSizeLimit" value="50" min="1" type="number"></td></tr></tbody></table><button id="buttonGenerateExport" type="button">Generate File to Download</button> <a id="download"></a>'
             //        document.body.appendChild(overlayStuff); // this is same but bottom
             document.body.insertBefore(overlayStuff, document.body.firstChild);
             document.getElementById('buttonGenerateExport').onclick = function(){
@@ -309,7 +359,12 @@ if (document.documentElement.classList.contains('logged-in')){
                         storeNames.push(document.getElementById('formStuffSave').elements[i].value)
                     }
                 }
-                exportData(storeNames)
+                exportData(document.getElementById('inputFilename').value,
+                           storeNames,
+                           document.getElementById('selectDateTimeFormat').value,
+                           document.getElementById('selectFileType').value,
+                           (1e6 * document.getElementById('inputFileSizeLimit').value), // javascript didn't force me to turn it into a number first
+                           document.getElementById('download'))
             }
             fab.innerHTML = '&uarr;'
         }
@@ -320,9 +375,7 @@ if (document.documentElement.classList.contains('logged-in')){
     }
 }
 
-// TODO: ctrl+f 'modular', fix functions...referenced elements as params...element changes as return and instead something outside the function changes the graphics.
-// FYI: page does not reload you go to different places.
-// another page TODO: log /p/...
+// FYI: page does not reload when you go to different places.
+// another page TODO: log https://www.instagram.com/p/...
 // another page TODO: log https://www.instagram.com/accounts/activity/ (works only for mobile right now)
 // another page TODO: log https://www.instagram.com/[username]
-
